@@ -1,0 +1,298 @@
+
+OVERVIEW OF STEPS TO SETUP WORDPRESS
+Step 1: Launch and Configure an Amazon Linux or Red Hat Enterprise Linux
+Amazon EC2 Instance
+Step 2: Configure Your Source Content to Be Deployed to the Amazon Linux or
+Red Hat Enterprise Linux Amazon EC2 Instance
+Step 3: Upload Your WordPress Application to Amazon S3
+Step 4: Deploy Your WordPress Application
+Step 5: Update and Redeploy Your WordPress Application
+Step 6: Clean Up Your WordPress Application and Related Resources
+
+SETUP CODEDEPLOY AGENT ON EC2 INSTANCES
+ssh -i /path/to/codedeploydemo.pem
+ec2-user@ec2-01-234-567-890.compute-1.amazonaws.com 
+sudo service codedeploy-agent status
+Make sure that you have a security group that has input bound traffic set for
+http on port 22 enabled
+Test if CodeDeploy Agent is installed
+sudo service codedeploy-agent status
+
+
+INSTALL CODEDEPLOY (PUT IN USER_DATA) IF NOT INSTALLED
+#!/bin/bash
+sudo yum update
+sudo yum install ruby
+sudo yum install wget
+cd /home
+cd ec2-user
+wget https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+chmod +x ./install
+sudo ./install auto
+sudo service codedeploy-agent status
+You may need to start the service if status check fails
+sudo service codedeploy-agent start
+sudo service codedeploy-agent stop
+
+
+DOWNLOAD THE SOURCE CODE FROM THE REPO
+Get the source code from Git Repository
+Create a WordPress Directory somewhere (maybe tmp)
+git init (if necessary
+git clone https://github.com/WordPress/WordPress.git /tmp/WordPress 
+
+Create scripts to run application
+makedir -p /tmp/WordPress/scripts
+Create an install_dependencies.sh file in /tmp/WordPress/scripts. Add the
+following lines to the file. This install_dependencies.sh script installs
+Apache, MySQL, and PHP. It also adds MySQL support to PHP. 
+
+#!/bin/bash
+sudo yum install -y httpd24 php70 mysql56-server php70-mysqlnd
+
+Create a start_server.sh file in /tmp/WordPress/scripts.
+#!/bin/bash
+
+service httpd start
+service mysqld start
+
+Create a stop_server.sh file in /tmp/WordPress/scripts
+#!/bin/bash
+isExistApp=`pgrep httpd`
+if [[ -n  $isExistApp ]]; then
+   service httpd stop
+fi
+isExistApp=`pgrep mysqld`
+if [[ -n  $isExistApp ]]; then
+    service mysqld stop
+fi  
+
+SEE THAT ACTUAL CODE AS THIS IS NOT A GOOD APPROACH
+Create a create_test_db.sh file in /tmp/WordPress/scripts 
+#!/bin/bash
+mysql -uroot <<CREATE_TEST_DB
+CREATE DATABASE test;
+CREATE_TEST_DB 
+
+Finally, create a change_permissions.sh script in /tmp/WordPress/scripts. 
+#!/bin/bash
+chmod -R 777 /var/www/html/WordPress  
+
+Give all of the scripts executable permissions. On the command line, type 
+  chmod +x /tmp/WordPress/scripts/*  
+
+Add application specification file: appspec.yml
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /var/www/html/WordPress
+hooks:
+  BeforeInstall:
+    - location: scripts/install_dependencies.sh
+      timeout: 300
+      runas: root
+  AfterInstall:
+    - location: scripts/change_permissions.sh
+      timeout: 300
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server.sh
+    - location: scripts/create_test_db.sh
+      timeout: 300
+      runas: root
+  ApplicationStop:
+    - location: scripts/stop_server.sh
+      timeout: 300
+      runas: root 
+
+
+Upload WordPress Application to S3 
+Create S3 Bucket
+
+  aws s3 mb s3://codedeploydemobucket
+
+Give Permission to bucket
+   {
+    "Statement": [
+        {
+            "Action": [
+                "s3:PutObject"
+            ],
+            "Effect": "Allow",
+            "Resource": "arn:aws:s3:::codedeploydemobucket/*",
+            "Principal": {
+                "AWS": [
+                    "111122223333"
+                ]
+            }
+        }
+    ]
+  }
+Your account must have permission to upload the revision to the Amazon S3
+bucket 
+{
+  "Version":"2012-10-17",  
+  "Statement":[
+    {
+      "Effect":"Allow",
+      "Action":["s3:PutObject"],
+      "Resource":"arn:aws:s3:::codedeploydemobucket/*"
+    }
+  ]
+}     
+Prepare Application for Files Upload 
+/tmp/
+  |--WordPress/
+      |-- appspec.yml  
+      |-- scripts/
+      |    |-- change_permissions.sh
+      |    |-- create_test_db.sh
+      |    |-- install_dependencies.sh
+      |    |-- start_server.sh
+      |    |-- stop_server.sh
+      |-- wp-admin/
+      |    |-- (various files...)
+      |-- wp-content/
+      |    |-- (various files...)
+      |-- wp-includes/
+      |    |-- (various files...)
+      |-- index.php
+      |-- license.txt
+      |-- readme.html
+      |-- (various files ending with .php...)  
+Bundle application into a single file and push file to S3
+Call the create-application command to register a new application named
+WordPress_App:  
+aws deploy create-application --application-name WordPress_App 
+Call the AWS CodeDeploy push command to bundle the files together, upload the
+revisions to Amazon S3, and register information with AWS CodeDeploy about the
+uploaded revision, all in one action. 
+  aws deploy push \
+  --application-name WordPress_App \
+  --s3-location s3://codedeploydemobucket/WordPressApp.zip \
+  --ignore-hidden-files
+Deploy Word Press Application
+
+Create a service role (this needs clarification)
+Create file:  CodeDeployDemo-Trust.json (This should be more restrictive)
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": [
+                    "codedeploy.amazonaws.com"
+                ]
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+} 
+From the same directory, call the create-role command to create a service
+role named CodeDeployServiceRole based on the information in the text file you
+just created: 
+aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document file://CodeDeployDemo-Trust.json 
+
+( In the command's output, make a note of the value of the Arn entry under the
+Role object. You need it later when you create deployment groups )
+
+Apply a Managed Policy to the role created (CodeDeployServiceRole)    
+aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole 
+
+Get service role ARN 
+aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 
+
+Create an IAM Instance Profile for the EC2 instance (CLI)
+  On your development machine, create a text file named
+CodeDeployDemo-EC2-Trust.json. Paste the following content, which allows
+Amazon EC2 to work on your behalf:
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+In the same directory, create a text file named
+CodeDeployDemo-EC2-Permissions.json. Paste the following content:
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+                "s3:Get*",
+                "s3:List*"
+            ],
+            "Effect": "Allow",
+            "Resource": "*"
+        }
+    ]
+}
+From the same directory, call the create-role command to create an IAM role
+named CodeDeployDemo-EC2-Instance-Profile, based on the information in the
+first file 
+aws iam create-role --role-name CodeDeployDemo-EC2-Instance-Profile --assume-role-policy-document file://CodeDeployDemo-EC2-Trust.json 
+
+From the same directory, call the put-role-policy command to give the role
+named CodeDeployDemo-EC2-Instance-Profile the permissions based on the
+information in the second file:  
+aws iam put-role-policy --role-name CodeDeployDemo-EC2-Instance-Profile --policy-name CodeDeployDemo-EC2-Permissions --policy-document file://CodeDeployDemo-EC2-Permissions.json
+
+Call the create-instance-profile command followed by the
+add-role-to-instance-profile command to create an IAM instance profile named
+CodeDeployDemo-EC2-Instance-Profile. The instance profile allows Amazon EC2 to
+pass the IAM role named CodeDeployDemo-EC2-Instance-Profile to an Amazon EC2
+instance when the instance is firstlaunched:
+
+aws iam create-instance-profile --instance-profile-name CodeDeployDemo-EC2-Instance-Profile
+
+aws iam add-role-to-instance-profile --instance-profile-name CodeDeployDemo-EC2-Instance-Profile --role-name CodeDeployDemo-EC2-Instance-Profile
+
+Now that you have the service role ARN, call the create-deployment-group
+command to create a deployment group named WordPress_DepGroup, associated with
+the application named WordPress_App, using the Amazon EC2 tag named
+CodeDeployDemo and deployment configuration named
+CodeDeployDefault.OneAtATime:
+
+aws deploy create-deployment-group \
+  --application-name WordPress_App \
+  --deployment-group-name WordPress_DepGroup \
+  --deployment-config-name CodeDeployDefault.OneAtATime \
+  --ec2-tag-filters Key=Name,Value=CodeDeployDemo,Type=KEY_AND_VALUE \
+  --service-role-arn serviceRoleARN  
+
+Now call the create-deployment command to create a deployment associated with
+the application named WordPress_App, the deployment configuration named
+CodeDeployDefault.OneAtATime, and the deployment group named
+WordPress_DepGroup, using the application revision named WordPressApp.zip in
+the bucket named codedeploydemobucket: 
+
+  aws deploy create-deployment \
+  --application-name WordPress_App \
+  --deployment-config-name CodeDeployDefault.OneAtATime \
+  --deployment-group-name WordPress_DepGroup \
+  --s3-location
+bucket=codedeploydemobucket,bundleType=zip,key=WordPressApp.zip
+
+Monitor and troubleshoot the deployment
+Get the deployment's ID by calling the list-deployments command against the
+application named WordPress_App and the deployment group
+namedWordPress_DepGroup:
+aws deploy list-deployments --application-name WordPress_App
+--deployment-group-name WordPress_DepGroup --query 'deployments' --output text
+Call the get-deployment command with the deployment ID:
+aws deploy get-deployment --deployment-id deploymentID --query
+'deploymentInfo.status' --output text
+Verify Deployment
+http://ec2-01-234-567-890.compute-1.amazonaws.com/WordPress  
+
